@@ -1,0 +1,770 @@
+// Cinemana Download Button Content Script (Isolated World)
+
+let videoFiles = [];
+let subtitleFiles = [];
+let movieTitle = "Cinemana_Video";
+let lastUrl = location.href;
+let mainWorldInjected = false;
+let injectQueued = false;
+
+console.log("[Cinemana DL Extension] Content script loaded. Current URL:", lastUrl);
+
+function injectMainWorldInterceptor() {
+  if (mainWorldInjected || document.documentElement.dataset.cinemanaDlInjected === 'true') {
+    return;
+  }
+
+  mainWorldInjected = true;
+  document.documentElement.dataset.cinemanaDlInjected = 'true';
+
+  const script = document.createElement('script');
+  script.src = chrome.runtime.getURL('main-world.js');
+  script.onload = () => script.remove();
+  (document.head || document.documentElement).appendChild(script);
+}
+
+injectMainWorldInterceptor();
+
+// Listen to postMessage from the main world
+window.addEventListener('message', function(event) {
+  if (event.source !== window || !event.data || event.data.type !== 'CINEMANA_API_DATA') {
+    return;
+  }
+
+  const { url, data } = event.data;
+  
+  // Intercept video file details
+  if (url.includes('/videoFiles') || url.includes('/allVideoFiles') || (data && Array.isArray(data) && data.length > 0 && data[0].videoUrl)) {
+    console.log("[Cinemana DL Extension] Intercepted video files:", data);
+    parseVideoFiles(data);
+    updateDropdownUI();
+  }
+
+  // Intercept subtitle/translation details
+  if (isSubtitleUrl(url) || url.includes('/translation') || url.includes('/transfile') || url.includes('/subtitles') || (data && Array.isArray(data) && data.length > 0 && (data[0].fileUrl || data[0].srt || data[0].vtt))) {
+    console.log("[Cinemana DL Extension] Intercepted subtitles:", data);
+    parseSubtitles(data || { url });
+    updateDropdownUI();
+  }
+});
+
+// Detect SPA URL changes and reset state
+setInterval(() => {
+  if (location.href !== lastUrl) {
+    console.log("[Cinemana DL Extension] Route changed from", lastUrl, "to", location.href);
+    lastUrl = location.href;
+    videoFiles = [];
+    subtitleFiles = [];
+    const oldContainer = document.getElementById('cinemana-download-container');
+    if (oldContainer) {
+      oldContainer.remove();
+    }
+    // Re-inject for the new video page
+    setTimeout(() => {
+      injectDownloadButton();
+      updateDropdownUI();
+    }, 1000);
+  }
+}, 800);
+
+// Recursively search for video URLs and resolutions
+function parseVideoFiles(data) {
+  const foundFiles = [];
+  
+  function search(obj) {
+    if (!obj) return;
+    if (typeof obj === 'string') {
+      return;
+    }
+    if (Array.isArray(obj)) {
+      obj.forEach(item => search(item));
+      return;
+    }
+    if (typeof obj === 'object') {
+      const url = obj.videoUrl || obj.fileUrl || obj.url || obj.link;
+      const res = normalizeVideoQuality(obj.resolution || obj.quality || obj.label || obj.name || url);
+      if (url && typeof url === 'string' && (url.includes('.mp4') || url.includes('.m3u8') || url.includes('.mkv') || url.includes('video'))) {
+        foundFiles.push({
+          url: url,
+          quality: res || 'HD',
+          type: obj.container || 'mp4'
+        });
+      } else {
+        for (let key in obj) {
+          if (obj.hasOwnProperty(key)) {
+            search(obj[key]);
+          }
+        }
+      }
+    }
+  }
+
+  search(data);
+  if (foundFiles.length > 0) {
+    // Unique list by quality
+    const seen = new Set();
+    videoFiles = foundFiles.filter(file => {
+      const duplicate = seen.has(file.quality);
+      seen.add(file.quality);
+      return !duplicate;
+    }).sort((a, b) => getVideoQualityRank(b.quality) - getVideoQualityRank(a.quality));
+    console.log("[Cinemana DL Extension] Parsed video files:", videoFiles);
+  }
+}
+
+function normalizeVideoQuality(value) {
+  const text = String(value || '').toLowerCase();
+  if (/(4k|2160|uhd)/i.test(text)) return '4K';
+  if (/(2k|1440|qhd)/i.test(text)) return '2K';
+  const resolution = text.match(/(1080|720|480|360|240)\s*p?/i);
+  if (resolution) return `${resolution[1]}p`;
+  if (/full\s*hd|fhd/i.test(text)) return '1080p';
+  if (/\bhd\b/i.test(text)) return '720p';
+  if (/\bsd\b/i.test(text)) return '360p';
+  return value || 'HD';
+}
+
+function getVideoQualityRank(quality) {
+  const text = String(quality || '').toLowerCase();
+  if (text.includes('4k') || text.includes('2160') || text.includes('uhd')) return 2160;
+  if (text.includes('2k') || text.includes('1440') || text.includes('qhd')) return 1440;
+  if (text.includes('1080') || text.includes('fhd')) return 1080;
+  if (text.includes('720') || /\bhd\b/.test(text)) return 720;
+  if (text.includes('480')) return 480;
+  if (text.includes('360') || /\bsd\b/.test(text)) return 360;
+  if (text.includes('240')) return 240;
+  return parseInt(text, 10) || 0;
+}
+
+// Recursively search for subtitle URLs and languages
+function parseSubtitles(data) {
+  const foundSubs = [];
+  
+  function search(obj) {
+    if (!obj) return;
+    if (typeof obj === 'string') {
+      extractSubtitleUrlsFromText(obj).forEach(url => {
+        const inferred = inferSubtitleLanguage({ url });
+        foundSubs.push({
+          url: normalizeDownloadUrl(url),
+          lang: inferred.label.charAt(0).toUpperCase() + inferred.label.slice(1),
+          ext: getSubtitleExtension(url)
+        });
+      });
+      return;
+    }
+    if (Array.isArray(obj)) {
+      obj.forEach(item => search(item));
+      return;
+    }
+    if (typeof obj === 'object') {
+      const url = obj.fileUrl || obj.url || obj.link || obj.srt || obj.vtt;
+      let lang = obj.lang || obj.language || obj.title || obj.name || obj.label;
+      if (url && typeof url === 'string' && isSubtitleFileUrl(url)) {
+        if (!lang) {
+          if (/(^|[_/-])ar([_./-]|$)|arabic/i.test(url)) lang = 'Arabic';
+          else if (/(^|[_/-])en([_./-]|$)|english/i.test(url)) lang = 'English';
+          else lang = 'Sub';
+        }
+        const inferred = inferSubtitleLanguage({ url, lang });
+        foundSubs.push({
+          url: normalizeDownloadUrl(url),
+          lang: inferred.label.charAt(0).toUpperCase() + inferred.label.slice(1),
+          ext: getSubtitleExtension(url)
+        });
+      } else {
+        for (let key in obj) {
+          if (obj.hasOwnProperty(key)) {
+            search(obj[key]);
+          }
+        }
+      }
+    }
+  }
+
+  search(data);
+  addSubtitleFiles(foundSubs);
+}
+
+function isSubtitleUrl(url) {
+  return typeof url === 'string' && /(\.vtt|\.srt|subtitle|subtitles|translation|transfile)/i.test(url);
+}
+
+function isSubtitleFileUrl(url) {
+  return /\.(vtt|srt)(?:\?|$)/i.test(String(url || ''));
+}
+
+function extractSubtitleUrlsFromText(text) {
+  if (typeof text !== 'string' || !isSubtitleUrl(text)) return [];
+  const urls = text.match(/https?:\/\/[^\s"'<>]+\.(?:vtt|srt)(?:\?[^\s"'<>]*)?/gi) || [];
+  if (/^\/[^/].*\.(?:vtt|srt)(?:\?|$)/i.test(text)) {
+    urls.push(text);
+  }
+  return urls.length > 0 ? urls : (isSubtitleFileUrl(text) ? [text] : []);
+}
+
+function addSubtitleUrl(url, lang) {
+  if (!isSubtitleFileUrl(url)) return;
+  const absoluteUrl = normalizeDownloadUrl(url);
+  const inferred = inferSubtitleLanguage({ url: absoluteUrl, lang });
+  addSubtitleFiles([{
+    url: absoluteUrl,
+    lang: inferred.label.charAt(0).toUpperCase() + inferred.label.slice(1),
+    ext: getSubtitleExtension(absoluteUrl)
+  }]);
+}
+
+function addSubtitleFiles(foundSubs) {
+  if (foundSubs.length > 0) {
+    const byKey = new Map();
+
+    subtitleFiles.concat(foundSubs).forEach(sub => {
+      const key = getSubtitleDedupeKey(sub);
+      const normalized = normalizeSubtitleFile(sub);
+      const existing = byKey.get(key);
+
+      if (!existing || (existing.lang === 'Sub' && normalized.lang !== 'Sub')) {
+        byKey.set(key, normalized);
+      }
+    });
+
+    const normalizedSubs = Array.from(byKey.values());
+    const hasNamedSubtitle = normalizedSubs.some(sub => sub.lang !== 'Sub');
+    subtitleFiles = hasNamedSubtitle ? normalizedSubs.filter(sub => sub.lang !== 'Sub') : normalizedSubs;
+    console.log("[Cinemana DL Extension] Parsed subtitles:", subtitleFiles);
+  }
+}
+
+function normalizeSubtitleFile(sub) {
+  const inferred = inferSubtitleLanguage(sub);
+  return {
+    url: normalizeDownloadUrl(sub.url),
+    lang: inferred.label.charAt(0).toUpperCase() + inferred.label.slice(1),
+    ext: sub.ext || getSubtitleExtension(sub.url)
+  };
+}
+
+function getSubtitleExtension(url) {
+  const cleanUrl = String(url || '').split('?')[0].toLowerCase();
+  if (cleanUrl.endsWith('.srt')) return 'srt';
+  return 'vtt';
+}
+
+function getSubtitleDedupeKey(sub) {
+  const inferred = inferSubtitleLanguage(sub);
+  const lang = inferred.code || inferred.label.toLowerCase();
+  const ext = sub.ext || getSubtitleExtension(sub.url);
+  const cleanPath = getCleanSubtitlePath(sub.url);
+  const transfile = cleanPath.match(/([^/]*_(?:ar|en)_transfile\.(?:vtt|srt))$/i);
+  return transfile ? transfile[1].toLowerCase() : `${lang}:${ext}`;
+}
+
+function isArabicSrtTransfile(sub) {
+  return inferSubtitleLanguage(sub).code === 'ar' &&
+    (sub.ext || getSubtitleExtension(sub.url)) === 'srt' &&
+    /_ar_transfile\.srt$/i.test(getCleanSubtitlePath(sub.url));
+}
+
+function getCleanSubtitlePath(url) {
+  try {
+    return new URL(url, location.href).pathname.toLowerCase();
+  } catch (error) {
+    return String(url || '').split('?')[0].toLowerCase();
+  }
+}
+
+function sanitizeFilename(str) {
+  return str.replace(/[^a-z0-9\u0600-\u06FF_-]/gi, '_');
+}
+
+function normalizeDownloadUrl(url) {
+  try {
+    return new URL(url, location.href).href;
+  } catch (error) {
+    return url;
+  }
+}
+
+function getMovieTitle() {
+  const selectors = [
+    'h1',
+    '.movie-title',
+    '.title',
+    '.video-title',
+    '.movie-name',
+    '.title-content h1'
+  ];
+  for (let selector of selectors) {
+    const el = document.querySelector(selector);
+    if (el && el.innerText.trim()) {
+      movieTitle = sanitizeFilename(el.innerText.trim());
+      break;
+    }
+  }
+  return movieTitle;
+}
+
+function getActiveSubtitleTrack() {
+  const video = document.querySelector('video');
+  if (!video || !video.textTracks) return null;
+  const activeTrack = Array.from(video.textTracks).find(track => track.mode === 'showing');
+  return activeTrack ? activeTrack.language || activeTrack.label : null;
+}
+
+function getPageLanguage() {
+  const match = location.pathname.match(/\/video\/(ar|en)\//i);
+  return match ? match[1].toLowerCase() : 'en';
+}
+
+function getUiText(key) {
+  const lang = getPageLanguage();
+  const labels = {
+    en: {
+      download: 'Download',
+      subtitle: 'Subtitle',
+      videoQuality: 'Video Quality',
+      subtitles: 'Subtitles',
+      waitingVideo: 'Play the video to capture download links.',
+      waitingSubtitle: 'Play the video to capture subtitle links.',
+      noVideo: 'Please play the video first so we can capture the streaming URL!',
+      noSubtitle: 'Please play the video first so we can capture the subtitle URL!',
+      defaultBadge: 'Default',
+      activeBadge: 'Running'
+    },
+    ar: {
+      download: '\u062a\u062d\u0645\u064a\u0644',
+      subtitle: '\u062a\u0631\u062c\u0645\u0629',
+      videoQuality: '\u062c\u0648\u062f\u0629 \u0627\u0644\u0641\u064a\u062f\u064a\u0648',
+      subtitles: '\u0627\u0644\u062a\u0631\u062c\u0645\u0627\u062a',
+      waitingVideo: '\u0634\u063a\u0644 \u0627\u0644\u0641\u064a\u062f\u064a\u0648 \u0644\u0627\u0644\u062a\u0642\u0627\u0637 \u0631\u0648\u0627\u0628\u0637 \u0627\u0644\u062a\u062d\u0645\u064a\u0644.',
+      waitingSubtitle: '\u0634\u063a\u0644 \u0627\u0644\u0641\u064a\u062f\u064a\u0648 \u0644\u0627\u0644\u062a\u0642\u0627\u0637 \u0631\u0648\u0627\u0628\u0637 \u0627\u0644\u062a\u0631\u062c\u0645\u0629.',
+      noVideo: '\u0634\u063a\u0644 \u0627\u0644\u0641\u064a\u062f\u064a\u0648 \u0623\u0648\u0644\u0627 \u062d\u062a\u0649 \u0646\u0644\u062a\u0642\u0637 \u0631\u0627\u0628\u0637 \u0627\u0644\u062a\u062d\u0645\u064a\u0644!',
+      noSubtitle: '\u0634\u063a\u0644 \u0627\u0644\u0641\u064a\u062f\u064a\u0648 \u0623\u0648\u0644\u0627 \u062d\u062a\u0649 \u0646\u0644\u062a\u0642\u0637 \u0631\u0627\u0628\u0637 \u0627\u0644\u062a\u0631\u062c\u0645\u0629!',
+      defaultBadge: '\u0627\u0641\u062a\u0631\u0627\u0636\u064a',
+      activeBadge: '\u0645\u0634\u063a\u0644\u0629'
+    }
+  };
+
+  return (labels[lang] || labels.en)[key] || labels.en[key];
+}
+
+function inferSubtitleLanguage(sub) {
+  const cleanPath = getCleanSubtitlePath(sub.url);
+  const source = `${sub.lang || ''} ${cleanPath}`.toLowerCase();
+  const fileName = cleanPath.split('/').pop() || '';
+
+  if (/(^|[_-])ar(?:[_-]transfile)?\.(?:vtt|srt)$/i.test(fileName) || /(?:^|[_/-])ar(?:[_./-]|$)|arabic|\u0639\u0631\u0628/.test(source)) {
+    return { code: 'ar', label: 'Arabic' };
+  }
+  if (/(^|[_-])en(?:[_-]transfile)?\.(?:vtt|srt)$/i.test(fileName) || /(?:^|[_/-])en(?:[_./-]|$)|english/.test(source)) {
+    return { code: 'en', label: 'English' };
+  }
+  return { code: '', label: sub.lang || 'Sub' };
+}
+
+function getPreferredSubtitle() {
+  const pageLang = getPageLanguage();
+  const activeLang = getActiveSubtitleTrack();
+
+  if (activeLang) {
+    const activeMatch = subtitleFiles.find(sub => {
+      const inferred = inferSubtitleLanguage(sub);
+      return sub.lang.toLowerCase().includes(activeLang.toLowerCase()) ||
+        activeLang.toLowerCase().includes(sub.lang.toLowerCase()) ||
+        inferred.code === activeLang.toLowerCase();
+    });
+    if (activeMatch) return activeMatch;
+  }
+
+  return subtitleFiles.find(sub => inferSubtitleLanguage(sub).code === pageLang) ||
+    subtitleFiles.find(isArabicSrtTransfile) ||
+    subtitleFiles.find(sub => inferSubtitleLanguage(sub).code === 'ar') ||
+    subtitleFiles[0];
+}
+
+// UI Injection logic
+function injectDownloadButton() {
+  if (!document.body) {
+    return;
+  }
+
+  // Only inject on video details/player pages
+  if (!location.href.includes('/video/')) {
+    const oldContainer = document.getElementById('cinemana-download-container');
+    if (oldContainer) {
+      oldContainer.remove();
+    }
+    return;
+  }
+
+  const target = findCinemanaVideoStat();
+  const existingContainer = document.getElementById('cinemana-download-container');
+
+  if (!target) {
+    return;
+  }
+
+  target.classList.add('cinemana-dl-stat-target');
+
+  if (existingContainer) {
+    existingContainer.classList.remove('cinemana-dl-floating');
+    if (existingContainer.parentElement !== target) {
+      target.appendChild(existingContainer);
+      console.log("[Cinemana DL Extension] Moved download button into video stat:", target);
+    }
+    return;
+  }
+
+  console.log("[Cinemana DL Extension] Injecting download button into video stat:", target);
+
+  const container = document.createElement('div');
+  container.id = 'cinemana-download-container';
+  container.className = 'cinemana-dl-container';
+  
+  container.innerHTML = `
+    <div class="cinemana-dl-group">
+      <button id="cinemana-dl-main-btn" class="cinemana-dl-btn cinemana-dl-btn-main">
+        <svg class="dl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+        <span data-i18n="download">${getUiText('download')}</span>
+      </button>
+      <button id="cinemana-dl-video-toggle" class="cinemana-dl-btn cinemana-dl-btn-toggle">
+        <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <div id="cinemana-dl-video-menu" class="cinemana-dl-menu">
+        <div class="menu-loading">${getUiText('waitingVideo')}</div>
+      </div>
+    </div>
+    <div class="cinemana-dl-group">
+      <button id="cinemana-dl-subtitle-btn" class="cinemana-dl-btn cinemana-dl-btn-main">
+        <svg class="subtitle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+          <path d="M8 9h8"></path>
+          <path d="M8 13h5"></path>
+        </svg>
+        <span data-i18n="subtitle">${getUiText('subtitle')}</span>
+      </button>
+      <button id="cinemana-dl-subtitle-toggle" class="cinemana-dl-btn cinemana-dl-btn-toggle">
+        <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <div id="cinemana-dl-subtitle-menu" class="cinemana-dl-menu">
+        <div class="menu-loading">${getUiText('waitingSubtitle')}</div>
+      </div>
+    </div>
+  `;
+
+  target.appendChild(container);
+
+  const mainBtn = container.querySelector('#cinemana-dl-main-btn');
+  const subtitleBtn = container.querySelector('#cinemana-dl-subtitle-btn');
+  const videoToggleBtn = container.querySelector('#cinemana-dl-video-toggle');
+  const subtitleToggleBtn = container.querySelector('#cinemana-dl-subtitle-toggle');
+  const videoMenu = container.querySelector('#cinemana-dl-video-menu');
+  const subtitleMenu = container.querySelector('#cinemana-dl-subtitle-menu');
+
+  mainBtn.addEventListener('click', handleMainDownload);
+  subtitleBtn.addEventListener('click', handleSubtitleDownload);
+  videoToggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    subtitleMenu.classList.remove('show');
+    videoMenu.classList.toggle('show');
+  });
+  subtitleToggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    videoMenu.classList.remove('show');
+    subtitleMenu.classList.toggle('show');
+  });
+
+  document.addEventListener('click', () => {
+    videoMenu.classList.remove('show');
+    subtitleMenu.classList.remove('show');
+  });
+
+  videoMenu.addEventListener('click', (e) => {
+    e.stopPropagation();
+  });
+
+  subtitleMenu.addEventListener('click', (e) => {
+    e.stopPropagation();
+  });
+
+  updateDropdownUI();
+}
+
+function findInjectionTarget() {
+  const statTarget = findCinemanaVideoStat();
+  if (statTarget) {
+    return statTarget;
+  }
+
+  const possibleSelectors = [
+    '[class*="like"]',
+    '[class*="thumb"]',
+    '[class*="vote"]',
+    '[class*="rating"]',
+    '[id*="like"]',
+    '[aria-label*="like" i]',
+    '[aria-label*="dislike" i]',
+    '[title*="like" i]',
+    '[title*="dislike" i]',
+    'button',
+    'a'
+  ];
+
+  for (let selector of possibleSelectors) {
+    const elements = document.querySelectorAll(selector);
+    for (let el of elements) {
+      const text = el.innerText || '';
+      const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`;
+      if (
+        /like/i.test(text) || 
+        /like|dislike/i.test(label) ||
+        /thumb|vote|rating/i.test(el.className || '') ||
+        /اعجبني/i.test(text) || 
+        /أعجبني/i.test(text) || 
+        el.querySelector('svg[class*="like"]') || 
+        el.querySelector('svg[class*="thumb"]') || 
+        el.querySelector('[class*="thumb"]') || 
+        el.querySelector('.fa-thumbs-up') ||
+        (el.innerText && (el.innerText.includes('👍') || el.innerText.includes('Like')))
+      ) {
+        if (
+          el.id !== 'cinemana-dl-main-btn' &&
+          el.id !== 'cinemana-dl-subtitle-btn' &&
+          el.id !== 'cinemana-dl-video-toggle' &&
+          el.id !== 'cinemana-dl-subtitle-toggle' &&
+          el.offsetWidth > 0
+        ) {
+          return el;
+        }
+      }
+    }
+  }
+
+  const actionContainers = [
+    '.movie-actions',
+    '.video-actions',
+    '.buttons-container',
+    '.interaction-bar',
+    '.rating-btns',
+    '.video-details',
+    '.movie-details'
+  ];
+  for (let selector of actionContainers) {
+    const el = document.querySelector(selector);
+    if (el) return el;
+  }
+
+  const titleSelectors = ['.title-content', '.movie-title', 'h1'];
+  for (let selector of titleSelectors) {
+    const el = document.querySelector(selector);
+    if (el) return el;
+  }
+
+  const playerSelectors = ['video', '.video-js', '#player', '.player-container'];
+  for (let selector of playerSelectors) {
+    const el = document.querySelector(selector);
+    if (el) return el;
+  }
+
+  return null;
+}
+
+function findCinemanaVideoStat() {
+  const exactXpath = '/html/body/app/vertical-layout/div/div/div/div/content/video-page/div/div[1]/cinemana-video/div/div/cinemana-video-detail/div/div[1]/div/cinemana-video-stat';
+  const exactResult = document.evaluate(exactXpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+  if (exactResult.singleNodeValue) {
+    return exactResult.singleNodeValue;
+  }
+
+  const directTarget = document.querySelector('#container-3 content video-page cinemana-video-stat, cinemana-video-stat');
+  if (directTarget) {
+    return directTarget;
+  }
+
+  const xpath = '//*[@id="container-3"]/content/video-page/div/div[1]/cinemana-video/div/div/cinemana-video-detail/div/div[1]/div/cinemana-video-stat';
+  const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+  return result.singleNodeValue;
+}
+
+function getInsertionAnchor(target) {
+  if (target.matches('button, a')) {
+    return target.closest('[class*="like"], [class*="thumb"], [class*="vote"], [class*="rating"], [class*="action"]') || target.parentElement || target;
+  }
+
+  return target;
+}
+
+function updateDropdownUI() {
+  const videoMenu = document.getElementById('cinemana-dl-video-menu');
+  const subtitleMenu = document.getElementById('cinemana-dl-subtitle-menu');
+  const downloadLabel = document.querySelector('[data-i18n="download"]');
+  const subtitleLabel = document.querySelector('[data-i18n="subtitle"]');
+  if (!videoMenu || !subtitleMenu) return;
+
+  if (downloadLabel) downloadLabel.textContent = getUiText('download');
+  if (subtitleLabel) subtitleLabel.textContent = getUiText('subtitle');
+  const mainBtn = document.getElementById('cinemana-dl-main-btn');
+  const subtitleBtn = document.getElementById('cinemana-dl-subtitle-btn');
+  if (mainBtn) mainBtn.title = getUiText('download');
+  if (subtitleBtn) subtitleBtn.title = getUiText('subtitle');
+
+  if (videoFiles.length === 0) {
+    videoMenu.innerHTML = `<div class="menu-loading">${getUiText('waitingVideo')}</div>`;
+  } else {
+    let videoHtml = `<div class="menu-section"><div class="menu-section-title">${getUiText('videoQuality')}</div>`;
+    videoFiles.forEach((file, index) => {
+      videoHtml += `
+        <div class="menu-item download-video" data-index="${index}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
+            <line x1="7" y1="2" x2="7" y2="22"></line>
+            <line x1="17" y1="2" x2="17" y2="22"></line>
+            <line x1="2" y1="12" x2="22" y2="12"></line>
+            <line x1="2" y1="7" x2="7" y2="7"></line>
+            <line x1="2" y1="17" x2="7" y2="17"></line>
+            <line x1="17" y1="17" x2="22" y2="17"></line>
+            <line x1="17" y1="7" x2="22" y2="7"></line>
+          </svg>
+          <span>${file.quality} (.${file.type})</span>
+        </div>
+      `;
+    });
+    videoHtml += `</div>`;
+    videoMenu.innerHTML = videoHtml;
+  }
+
+  if (subtitleFiles.length === 0) {
+    subtitleMenu.innerHTML = `<div class="menu-loading">${getUiText('waitingSubtitle')}</div>`;
+  } else {
+    const activeLang = getActiveSubtitleTrack();
+    const preferredSub = getPreferredSubtitle();
+    let subtitleHtml = `<div class="menu-section"><div class="menu-section-title">${getUiText('subtitles')}</div>`;
+
+    subtitleFiles.forEach((sub, index) => {
+      const inferred = inferSubtitleLanguage(sub);
+      const langLabel = inferred.label;
+      const ext = sub.ext || getSubtitleExtension(sub.url);
+      const isActive = activeLang && (
+        sub.lang.toLowerCase().includes(activeLang.toLowerCase()) ||
+        activeLang.toLowerCase().includes(sub.lang.toLowerCase()) ||
+        inferred.code === activeLang.toLowerCase()
+      );
+      const isDefault = preferredSub && preferredSub.url === sub.url;
+      subtitleHtml += `
+        <div class="menu-item download-sub" data-index="${index}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span>${langLabel} (.${ext})</span>
+          ${isActive ? `<span class="active-badge">${getUiText('activeBadge')}</span>` : ''}
+          ${!isActive && isDefault ? `<span class="active-badge">${getUiText('defaultBadge')}</span>` : ''}
+        </div>
+      `;
+    });
+    subtitleHtml += `</div>`;
+    subtitleMenu.innerHTML = subtitleHtml;
+  }
+
+  videoMenu.querySelectorAll('.download-video').forEach(el => {
+    el.addEventListener('click', function() {
+      const idx = parseInt(this.getAttribute('data-index'));
+      triggerDownloadVideo(videoFiles[idx]);
+    });
+  });
+
+  subtitleMenu.querySelectorAll('.download-sub').forEach(el => {
+    el.addEventListener('click', function() {
+      const idx = parseInt(this.getAttribute('data-index'));
+      triggerDownloadSubtitle(subtitleFiles[idx]);
+    });
+  });
+}
+
+function handleMainDownload() {
+  if (videoFiles.length === 0) {
+    alert(getUiText('noVideo'));
+    return;
+  }
+
+  let bestVideo = videoFiles[0];
+  
+  videoFiles.forEach(file => {
+    const resA = getVideoQualityRank(file.quality);
+    const resB = getVideoQualityRank(bestVideo.quality);
+    if (resA > resB) {
+      bestVideo = file;
+    }
+  });
+
+  triggerDownloadVideo(bestVideo);
+}
+
+function handleSubtitleDownload() {
+  if (subtitleFiles.length === 0) {
+    alert(getUiText('noSubtitle'));
+    return;
+  }
+
+  triggerDownloadSubtitle(getPreferredSubtitle());
+}
+
+function triggerDownloadVideo(videoFile) {
+  const title = getMovieTitle();
+  const filename = `${title}_${videoFile.quality}.${videoFile.type}`;
+  chrome.runtime.sendMessage({
+    action: 'download',
+    url: normalizeDownloadUrl(videoFile.url),
+    filename: filename
+  });
+}
+
+function triggerDownloadSubtitle(subFile) {
+  const title = getMovieTitle();
+  const ext = subFile.ext || getSubtitleExtension(subFile.url);
+  const inferred = inferSubtitleLanguage(subFile);
+  const lang = inferred.code || sanitizeFilename(inferred.label);
+  const filename = `${title}_${lang}.${ext}`;
+  chrome.runtime.sendMessage({
+    action: 'download',
+    url: normalizeDownloadUrl(subFile.url),
+    filename: filename
+  });
+}
+
+// Watch for DOM changes to inject button
+const observer = new MutationObserver((mutations) => {
+  if (injectQueued) return;
+  injectQueued = true;
+  requestAnimationFrame(() => {
+    injectQueued = false;
+    injectDownloadButton();
+  });
+});
+
+function startDomObserver() {
+  const observerRoot = document.documentElement || document.body;
+  if (!observerRoot) {
+    return;
+  }
+
+  observer.observe(observerRoot, {
+    childList: true,
+    subtree: true
+  });
+
+  injectDownloadButton();
+}
+
+if (document.documentElement || document.body) {
+  startDomObserver();
+} else {
+  document.addEventListener('DOMContentLoaded', startDomObserver, { once: true });
+}

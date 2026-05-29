@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Cinemana Download Button",
+  "version": "1.0",
+  "description": "Download videos and subtitles directly from Cinemana Shabakaty",
+  "permissions": ["downloads", "storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://cinemana.shabakaty.com/*",
+        "*://cinemana.shabakaty.cc/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": true
+    }
+  ],
+  "host_permissions": [
+    "*://cinemana.shabakaty.com/*",
+    "*://cinemana.shabakaty.cc/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["main-world.js"],
+      "matches": ["*://cinemana.shabakaty.com/*", "*://cinemana.shabakaty.cc/*"]
+    }
+  ]
+}
