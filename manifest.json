@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Cinemana Download Button",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Download videos and subtitles directly from Cinemana Shabakaty",
-  "permissions": ["downloads", "storage"],
+  "permissions": ["downloads"],
   "background": {
     "service_worker": "background.js"
   },
