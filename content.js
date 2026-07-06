@@ -4,6 +4,7 @@ let videoFiles = [];
 let subtitleFiles = [];
 let movieTitle = "Cinemana_Video";
 let lastUrl = location.href;
+let currentVideoKey = getVideoKeyFromPageUrl(location.href);
 let mainWorldInjected = false;
 let injectQueued = false;
 
@@ -25,13 +26,92 @@ function injectMainWorldInterceptor() {
 
 injectMainWorldInterceptor();
 
-// Listen to postMessage from the main world
-window.addEventListener('message', function(event) {
-  if (event.source !== window || !event.data || event.data.type !== 'CINEMANA_API_DATA') {
+function getVideoKeyFromPageUrl(url = location.href) {
+  try {
+    const parsedUrl = new URL(url, location.href);
+    const episodeId = parsedUrl.searchParams.get('lastEpisodeVideoID');
+    if (episodeId) {
+      return episodeId;
+    }
+
+    const pathMatch = parsedUrl.pathname.match(/\/video\/(?:ar|en)\/(\d+)/i);
+    return pathMatch ? pathMatch[1] : '';
+  } catch (error) {
+    const queryMatch = String(url || '').match(/[?&]lastEpisodeVideoID=(\d+)/i);
+    if (queryMatch) {
+      return queryMatch[1];
+    }
+
+    const pathMatch = String(url || '').match(/\/video\/(?:ar|en)\/(\d+)/i);
+    return pathMatch ? pathMatch[1] : '';
+  }
+}
+
+function isApiDataForCurrentEpisode(pageUrl) {
+  if (!pageUrl) {
+    return true;
+  }
+
+  const capturedVideoKey = getVideoKeyFromPageUrl(pageUrl);
+  const activeVideoKey = getVideoKeyFromPageUrl(location.href) || currentVideoKey;
+  return !capturedVideoKey || !activeVideoKey || capturedVideoKey === activeVideoKey;
+}
+
+function handleRouteChange(nextUrl = location.href) {
+  if (nextUrl === lastUrl) {
     return;
   }
 
-  const { url, data } = event.data;
+  console.log("[Cinemana DL Extension] Route changed from", lastUrl, "to", nextUrl);
+  const previousVideoKey = currentVideoKey;
+  const nextVideoKey = getVideoKeyFromPageUrl(nextUrl);
+  const isSameVideo = previousVideoKey && nextVideoKey && previousVideoKey === nextVideoKey;
+
+  lastUrl = nextUrl;
+  currentVideoKey = nextVideoKey;
+
+  if (!isSameVideo) {
+    videoFiles = [];
+    subtitleFiles = [];
+    movieTitle = "Cinemana_Video";
+  }
+
+  const oldContainer = document.getElementById('cinemana-download-container');
+  if (oldContainer) {
+    oldContainer.remove();
+  }
+
+  [100, 500, 1200].forEach(delay => {
+    setTimeout(() => {
+      injectDownloadButton();
+      updateDropdownUI();
+    }, delay);
+  });
+}
+
+// Listen to postMessage from the main world
+window.addEventListener('message', function(event) {
+  if (event.source !== window || !event.data) {
+    return;
+  }
+
+  if (event.data.type === 'CINEMANA_LOCATION_CHANGED') {
+    handleRouteChange(event.data.url || location.href);
+    return;
+  }
+
+  if (event.data.type !== 'CINEMANA_API_DATA') {
+    return;
+  }
+
+  handleRouteChange(location.href);
+
+  const { url, data, pageUrl } = event.data;
+
+  if (!isApiDataForCurrentEpisode(pageUrl)) {
+    console.log("[Cinemana DL Extension] Ignoring stale media data captured on", pageUrl, "while current URL is", location.href);
+    return;
+  }
   
   // Intercept video file details
   if (url.includes('/videoFiles') || url.includes('/allVideoFiles') || (data && Array.isArray(data) && data.length > 0 && data[0].videoUrl)) {
@@ -50,21 +130,7 @@ window.addEventListener('message', function(event) {
 
 // Detect SPA URL changes and reset state
 setInterval(() => {
-  if (location.href !== lastUrl) {
-    console.log("[Cinemana DL Extension] Route changed from", lastUrl, "to", location.href);
-    lastUrl = location.href;
-    videoFiles = [];
-    subtitleFiles = [];
-    const oldContainer = document.getElementById('cinemana-download-container');
-    if (oldContainer) {
-      oldContainer.remove();
-    }
-    // Re-inject for the new video page
-    setTimeout(() => {
-      injectDownloadButton();
-      updateDropdownUI();
-    }, 1000);
-  }
+  handleRouteChange(location.href);
 }, 800);
 
 // Recursively search for video URLs and resolutions
@@ -404,12 +470,11 @@ function injectDownloadButton() {
     return;
   }
 
-  target.classList.add('cinemana-dl-stat-target');
+  applyStatLayoutClasses(target);
 
   if (existingContainer) {
     existingContainer.classList.remove('cinemana-dl-floating');
-    if (existingContainer.parentElement !== target) {
-      target.appendChild(existingContainer);
+    if (placeDownloadContainerNearStats(target, existingContainer)) {
       console.log("[Cinemana DL Extension] Moved download button into video stat:", target);
     }
     return;
@@ -460,7 +525,7 @@ function injectDownloadButton() {
     </div>
   `;
 
-  target.appendChild(container);
+  placeDownloadContainerNearStats(target, container);
 
   const mainBtn = container.querySelector('#cinemana-dl-main-btn');
   const subtitleBtn = container.querySelector('#cinemana-dl-subtitle-btn');
@@ -496,6 +561,82 @@ function injectDownloadButton() {
   });
 
   updateDropdownUI();
+}
+
+function applyStatLayoutClasses(target) {
+  target.classList.add('cinemana-dl-stat-target');
+
+  const statRow = target.parentElement;
+  if (statRow) {
+    statRow.classList.add('cinemana-dl-stat-row');
+  }
+}
+
+function placeDownloadContainerNearStats(target, container) {
+  const anchor = findStatControlsAnchor(target);
+
+  if (anchor && anchor.parentElement) {
+    anchor.parentElement.classList.add('cinemana-dl-inline-host');
+
+    if (container.previousElementSibling === anchor && container.parentElement === anchor.parentElement) {
+      return false;
+    }
+
+    anchor.insertAdjacentElement('afterend', container);
+    return true;
+  }
+
+  if (container.parentElement !== target) {
+    target.appendChild(container);
+    return true;
+  }
+
+  return false;
+}
+
+function findStatControlsAnchor(target) {
+  const controls = Array.from(target.querySelectorAll('button, a, [role="button"]')).filter(el => {
+    return !el.closest('#cinemana-download-container') && isVisibleElement(el);
+  });
+
+  if (controls.length === 0) {
+    return Array.from(target.children).find(child => {
+      return child.id !== 'cinemana-download-container' && isVisibleElement(child);
+    }) || null;
+  }
+
+  if (controls.length === 1) {
+    return controls[0];
+  }
+
+  const commonParent = getLowestCommonAncestor(controls[0], controls[1], target);
+  return commonParent && commonParent !== target ? commonParent : controls[1];
+}
+
+function getLowestCommonAncestor(first, second, limit) {
+  const ancestors = new Set();
+  let node = first;
+
+  while (node && node !== limit.parentElement) {
+    ancestors.add(node);
+    if (node === limit) break;
+    node = node.parentElement;
+  }
+
+  node = second;
+  while (node && node !== limit.parentElement) {
+    if (ancestors.has(node)) {
+      return node;
+    }
+    if (node === limit) break;
+    node = node.parentElement;
+  }
+
+  return null;
+}
+
+function isVisibleElement(el) {
+  return !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0));
 }
 
 function findInjectionTarget() {

@@ -13,7 +13,9 @@
   font-family: inherit;
   z-index: 9999;
   overflow: visible;
-  gap: 6px;
+  gap: 4px;
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 
 #cinemana-download-container.cinemana-dl-floating {
@@ -25,33 +27,64 @@
 }
 
 cinemana-video-stat #cinemana-download-container {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
+  position: relative;
+  right: auto;
+  top: auto;
+  transform: none;
   display: inline-flex;
   flex: 0 0 auto;
-  margin-left: 0;
+  margin-left: auto;
   margin-right: 0;
   vertical-align: middle;
+}
+
+.cinemana-dl-inline-host {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 4px !important;
+  flex-wrap: nowrap !important;
+  width: 100% !important;
+  direction: ltr !important;
+  unicode-bidi: isolate !important;
+}
+
+.cinemana-dl-stat-row {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  width: 100% !important;
+}
+
+cinemana-video-detail div:has(> cinemana-video-stat.cinemana-dl-stat-target) {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  width: 100% !important;
 }
 
 cinemana-video-stat:has(#cinemana-download-container) {
   position: relative !important;
   display: flex !important;
   align-items: center !important;
-  justify-content: center !important;
-  gap: 8px !important;
+  justify-content: flex-end !important;
+  gap: 4px !important;
   flex-wrap: nowrap !important;
+  width: 100% !important;
+  direction: ltr !important;
+  unicode-bidi: isolate !important;
 }
 
 cinemana-video-stat.cinemana-dl-stat-target {
   position: relative !important;
   display: flex !important;
   align-items: center !important;
-  justify-content: center !important;
-  gap: 8px !important;
+  justify-content: flex-end !important;
+  gap: 4px !important;
   flex-wrap: nowrap !important;
+  width: 100% !important;
+  direction: ltr !important;
+  unicode-bidi: isolate !important;
 }
 
 .cinemana-dl-btn {
@@ -65,6 +98,7 @@ cinemana-video-stat.cinemana-dl-stat-target {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-direction: row;
   gap: 5px;
   cursor: pointer;
   transition:
@@ -75,11 +109,20 @@ cinemana-video-stat.cinemana-dl-stat-target {
 
 .cinemana-dl-group {
   display: inline-flex;
+  flex-direction: row;
   position: relative;
   background-color: #111c26;
   border: 1px solid #172735;
   border-radius: 7px;
   overflow: visible;
+}
+
+.cinemana-dl-btn span,
+.menu-item span,
+.menu-section-title,
+.menu-loading {
+  direction: auto;
+  unicode-bidi: isolate;
 }
 
 .cinemana-dl-btn:hover {
