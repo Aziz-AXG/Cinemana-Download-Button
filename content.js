@@ -3,6 +3,7 @@
 let videoFiles = [];
 let subtitleFiles = [];
 let movieTitle = "Cinemana_Video";
+let mediaMetadata = {};
 let lastUrl = location.href;
 let currentVideoKey = getVideoKeyFromPageUrl(location.href);
 let mainWorldInjected = false;
@@ -10,8 +11,54 @@ let injectQueued = false;
 
 console.log("[Cinemana DL Extension] Content script loaded. Current URL:", lastUrl);
 
+function getExtensionRuntime() {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
+      return chrome.runtime;
+    }
+  } catch (error) {
+    return null;
+  }
+
+  return null;
+}
+
+function alertExtensionContextInvalidated() {
+  alert('The Cinemana Download Button extension was reloaded. Please refresh this Cinemana tab, then try downloading again.');
+}
+
+function sendDownloadMessage(payload, onResponse) {
+  const runtime = getExtensionRuntime();
+  if (!runtime) {
+    alertExtensionContextInvalidated();
+    return false;
+  }
+
+  try {
+    runtime.sendMessage(payload, response => {
+      try {
+        if (chrome.runtime.lastError) {
+          console.error('[Cinemana DL Extension] Download message failed:', chrome.runtime.lastError);
+        } else if (typeof onResponse === 'function') {
+          onResponse(response);
+        }
+      } catch (error) {}
+    });
+    return true;
+  } catch (error) {
+    console.error('[Cinemana DL Extension] Extension context is no longer available:', error);
+    alertExtensionContextInvalidated();
+    return false;
+  }
+}
+
 function injectMainWorldInterceptor() {
   if (mainWorldInjected || document.documentElement.dataset.cinemanaDlInjected === 'true') {
+    return;
+  }
+
+  const runtime = getExtensionRuntime();
+  if (!runtime) {
     return;
   }
 
@@ -19,7 +66,7 @@ function injectMainWorldInterceptor() {
   document.documentElement.dataset.cinemanaDlInjected = 'true';
 
   const script = document.createElement('script');
-  script.src = chrome.runtime.getURL('main-world.js');
+  script.src = runtime.getURL('main-world.js');
   script.onload = () => script.remove();
   (document.head || document.documentElement).appendChild(script);
 }
@@ -74,6 +121,7 @@ function handleRouteChange(nextUrl = location.href) {
     videoFiles = [];
     subtitleFiles = [];
     movieTitle = "Cinemana_Video";
+    mediaMetadata = {};
   }
 
   const oldContainer = document.getElementById('cinemana-download-container');
@@ -112,16 +160,28 @@ window.addEventListener('message', function(event) {
     console.log("[Cinemana DL Extension] Ignoring stale media data captured on", pageUrl, "while current URL is", location.href);
     return;
   }
-  
+
+  const isVideoFilesResponse = url.includes('/videoFiles') || url.includes('/allVideoFiles') || (data && Array.isArray(data) && data.length > 0 && data[0].videoUrl);
+  const isSubtitleResponse = isSubtitleUrl(url) || url.includes('/translation') || url.includes('/transfile') || url.includes('/subtitles') || (data && Array.isArray(data) && data.length > 0 && (data[0].fileUrl || data[0].srt || data[0].vtt));
+
+  // Video-file and subtitle-listing responses are arrays of track objects like
+  // { name: "Arabic", url: "..." }. Their "name"/"title" fields are track
+  // labels, not the show name, so running the generic metadata scan on them
+  // would overwrite the real title with a subtitle language name. Only scan
+  // responses that aren't already identified as one of those two kinds.
+  if (!isVideoFilesResponse && !isSubtitleResponse) {
+    parseMediaMetadata(data);
+  }
+
   // Intercept video file details
-  if (url.includes('/videoFiles') || url.includes('/allVideoFiles') || (data && Array.isArray(data) && data.length > 0 && data[0].videoUrl)) {
+  if (isVideoFilesResponse) {
     console.log("[Cinemana DL Extension] Intercepted video files:", data);
     parseVideoFiles(data);
     updateDropdownUI();
   }
 
   // Intercept subtitle/translation details
-  if (isSubtitleUrl(url) || url.includes('/translation') || url.includes('/transfile') || url.includes('/subtitles') || (data && Array.isArray(data) && data.length > 0 && (data[0].fileUrl || data[0].srt || data[0].vtt))) {
+  if (isSubtitleResponse) {
     console.log("[Cinemana DL Extension] Intercepted subtitles:", data);
     parseSubtitles(data || { url });
     updateDropdownUI();
@@ -284,7 +344,9 @@ function addSubtitleFiles(foundSubs) {
   if (foundSubs.length > 0) {
     const byKey = new Map();
 
-    subtitleFiles.concat(foundSubs).forEach(sub => {
+    subtitleFiles.concat(foundSubs).filter(sub => {
+      return (sub.ext || getSubtitleExtension(sub.url)) === 'vtt';
+    }).forEach(sub => {
       const key = getSubtitleDedupeKey(sub);
       const normalized = normalizeSubtitleFile(sub);
       const existing = byKey.get(key);
@@ -325,12 +387,6 @@ function getSubtitleDedupeKey(sub) {
   return transfile ? transfile[1].toLowerCase() : `${lang}:${ext}`;
 }
 
-function isArabicSrtTransfile(sub) {
-  return inferSubtitleLanguage(sub).code === 'ar' &&
-    (sub.ext || getSubtitleExtension(sub.url)) === 'srt' &&
-    /_ar_transfile\.srt$/i.test(getCleanSubtitlePath(sub.url));
-}
-
 function getCleanSubtitlePath(url) {
   try {
     return new URL(url, location.href).pathname.toLowerCase();
@@ -340,14 +396,19 @@ function getCleanSubtitlePath(url) {
 }
 
 function sanitizeFilename(str) {
-  return str.replace(/[^a-z0-9\u0600-\u06FF_-]/gi, '_');
+  return String(str || '')
+    .trim()
+    .replace(/['"]/g, '')
+    .replace(/[^a-z0-9\u0600-\u06FF_-]/gi, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'Cinemana_Video';
 }
 
 function normalizeDownloadUrl(url) {
   try {
-    return new URL(url, location.href).href;
+    return new URL(String(url || '').replace(/&amp;/g, '&'), location.href).href;
   } catch (error) {
-    return url;
+    return String(url || '').replace(/&amp;/g, '&');
   }
 }
 
@@ -367,7 +428,201 @@ function getMovieTitle() {
       break;
     }
   }
+
+  if (movieTitle === "Cinemana_Video" && document.title && document.title.trim()) {
+    movieTitle = sanitizeFilename(document.title.replace(/\s*[-|]\s*Cinemana.*$/i, '').trim());
+  }
+
   return movieTitle;
+}
+
+function parseMediaMetadata(data) {
+  if (!data) return;
+
+  const nextMetadata = {};
+  const titleKeys = new Set(['title', 'name', 'movietitle', 'moviename', 'videotitle', 'originaltitle', 'englishtitle', 'arabictitle']);
+  const seriesKeys = new Set(['seriesname', 'showname', 'tvshowname', 'serialname', 'programname']);
+  const seasonKeys = new Set(['season', 'seasonnumber', 'seasonno', 'seasonnum', 'seasonindex']);
+  const episodeKeys = new Set(['episode', 'episodenumber', 'episodeno', 'episodenum', 'episodeindex']);
+
+  function assignText(field, value) {
+    if (nextMetadata[field] || value === null || value === undefined) return;
+    const text = String(value).trim();
+    if (!text || /^\d+$/.test(text) || /^https?:\/\//i.test(text)) return;
+    nextMetadata[field] = text;
+  }
+
+  function assignNumber(field, value) {
+    if (nextMetadata[field] || value === null || value === undefined) return;
+    const match = String(value).match(/\d{1,4}/);
+    if (match) nextMetadata[field] = match[0];
+  }
+
+  function walk(obj, depth = 0) {
+    if (!obj || depth > 6) return;
+    if (Array.isArray(obj)) {
+      obj.forEach(item => walk(item, depth + 1));
+      return;
+    }
+    if (typeof obj !== 'object') return;
+
+    for (const key in obj) {
+      if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
+      const value = obj[key];
+      const normalizedKey = key.replace(/[_-]/g, '').toLowerCase();
+
+      if (seriesKeys.has(normalizedKey)) {
+        assignText('seriesName', value);
+      } else if (titleKeys.has(normalizedKey)) {
+        assignText('title', value);
+      } else if (seasonKeys.has(normalizedKey)) {
+        assignNumber('seasonNumber', value);
+      } else if (episodeKeys.has(normalizedKey)) {
+        assignNumber('episodeNumber', value);
+      }
+
+      if (value && typeof value === 'object') {
+        walk(value, depth + 1);
+      }
+    }
+  }
+
+  walk(data);
+  mediaMetadata = { ...mediaMetadata, ...nextMetadata };
+}
+
+function parseSeasonEpisodeFromText(text) {
+  const source = String(text || '').replace(/\s+/g, ' ');
+  const seasonFirst = [
+    /\bS(?:eason)?\s*0*(\d{1,3})\s*[-_.,:]?\s*E(?:p(?:isode)?)?\s*0*(\d{1,4})\b/i,
+    /\bSeason\s*0*(\d{1,3})\b.*?\bEpisode\s*0*(\d{1,4})\b/i,
+    /الموسم\s*0*(\d{1,3}).*?الحلقة\s*0*(\d{1,4})/i
+  ];
+  const episodeFirst = [
+    /\bEpisode\s*0*(\d{1,4})\b.*?\bSeason\s*0*(\d{1,3})\b/i,
+    /الحلقة\s*0*(\d{1,4}).*?الموسم\s*0*(\d{1,3})/i
+  ];
+
+  for (const pattern of seasonFirst) {
+    const match = source.match(pattern);
+    if (match) return { seasonNumber: match[1], episodeNumber: match[2] };
+  }
+
+  for (const pattern of episodeFirst) {
+    const match = source.match(pattern);
+    if (match) return { seasonNumber: match[2], episodeNumber: match[1] };
+  }
+
+  return {};
+}
+
+// Likewise, the episode carousel lists every episode, marking only the one
+// currently playing with an "iswatching" class on its container, e.g.
+// <div class="episode-item iswatching"> ... <p class="type">Episode 2</p>
+function getActiveEpisodeElement() {
+  const selectors = [
+    '.episode-item.iswatching',
+    '[class*="episode-item"][class*="iswatching"]',
+    '[class*="episode"][class*="watching"]'
+  ];
+  for (const selector of selectors) {
+    const el = document.querySelector(selector);
+    if (el) return el;
+  }
+  return null;
+}
+
+function getActiveEpisodeNumber(episodeEl) {
+  const el = episodeEl || getActiveEpisodeElement();
+  if (!el) return null;
+  const text = el.innerText || el.textContent || '';
+  const match = text.match(/Episode\s*0*(\d{1,4})/i) || text.match(/الحلقة\s*0*(\d{1,4})/);
+  return match ? match[1] : null;
+}
+
+// Cinemana's season selector lists every season as a plain number, marking
+// only the currently selected one with an "active" class, e.g.
+// <span class="season-number active">3</span>
+// The page can contain more than one season block at once (mobile/desktop
+// layouts, or a leftover block from a season the user previewed earlier), so
+// a page-wide query can land on a stale "active" season. To avoid that, look
+// first within the same season container as the episode we already found is
+// actually playing, and only fall back to a page-wide search if that fails.
+function getActiveSeasonNumber(episodeEl) {
+  const selectors = ['.season-number.active', '[class*="season-number"][class*="active"]'];
+  const el = episodeEl || getActiveEpisodeElement();
+  const scope = el && (el.closest('.season-container') || el.closest('.season-info'));
+
+  const searchIn = (root) => {
+    for (const selector of selectors) {
+      const match = root.querySelector(selector);
+      const text = match && (match.innerText || match.textContent || '').trim();
+      const num = text && text.match(/\d{1,3}/);
+      if (num) return num[0];
+    }
+    return null;
+  };
+
+  return (scope && searchIn(scope)) || searchIn(document);
+}
+
+function getDomMediaMetadata() {
+  const activeEpisodeEl = getActiveEpisodeElement();
+  const activeEpisodeNumber = getActiveEpisodeNumber(activeEpisodeEl);
+  const activeSeasonNumber = getActiveSeasonNumber(activeEpisodeEl);
+
+  if (activeSeasonNumber && activeEpisodeNumber) {
+    return {
+      title: getMovieTitle(),
+      seasonNumber: activeSeasonNumber,
+      episodeNumber: activeEpisodeNumber
+    };
+  }
+
+  // Fallback for pages that don't use the season-number/episode-item markup
+  // above: join all season/episode-ish text on the page and pattern-match it.
+  // This is best-effort only, since it can't distinguish the active season or
+  // episode from other ones listed on the same page.
+  const selectors = [
+    'h1',
+    '.movie-title',
+    '.title',
+    '.video-title',
+    '.movie-name',
+    '.title-content h1',
+    '[class*="season"]',
+    '[class*="episode"]',
+    'cinemana-video-detail'
+  ];
+  const parts = [];
+
+  selectors.forEach(selector => {
+    document.querySelectorAll(selector).forEach(el => {
+      const text = (el.innerText || el.textContent || '').trim();
+      if (text) parts.push(text);
+    });
+  });
+
+  const fallback = parseSeasonEpisodeFromText(parts.join(' '));
+  return {
+    title: getMovieTitle(),
+    seasonNumber: activeSeasonNumber || fallback.seasonNumber,
+    episodeNumber: activeEpisodeNumber || fallback.episodeNumber
+  };
+}
+
+function getMediaFilenameBase() {
+  const metadata = { ...getDomMediaMetadata(), ...mediaMetadata };
+  const seasonNumber = metadata.seasonNumber;
+  const episodeNumber = metadata.episodeNumber;
+  const isSeries = Boolean(seasonNumber && episodeNumber) || /[?&]lastEpisodeVideoID=/i.test(location.href);
+  const title = metadata.seriesName || metadata.title || getMovieTitle();
+
+  if (isSeries && seasonNumber && episodeNumber) {
+    return sanitizeFilename(`${title}_s${seasonNumber}_e${episodeNumber}`);
+  }
+
+  return sanitizeFilename(title);
 }
 
 function getActiveSubtitleTrack() {
@@ -443,7 +698,6 @@ function getPreferredSubtitle() {
   }
 
   return subtitleFiles.find(sub => inferSubtitleLanguage(sub).code === pageLang) ||
-    subtitleFiles.find(isArabicSrtTransfile) ||
     subtitleFiles.find(sub => inferSubtitleLanguage(sub).code === 'ar') ||
     subtitleFiles[0];
 }
@@ -858,25 +1112,29 @@ function handleSubtitleDownload() {
 }
 
 function triggerDownloadVideo(videoFile) {
-  const title = getMovieTitle();
-  const filename = `${title}_${videoFile.quality}.${videoFile.type}`;
-  chrome.runtime.sendMessage({
+  const base = getMediaFilenameBase();
+  const filename = `${base}.${videoFile.type}`;
+  sendDownloadMessage({
     action: 'download',
     url: normalizeDownloadUrl(videoFile.url),
     filename: filename
   });
 }
 
-function triggerDownloadSubtitle(subFile) {
-  const title = getMovieTitle();
-  const ext = subFile.ext || getSubtitleExtension(subFile.url);
-  const inferred = inferSubtitleLanguage(subFile);
-  const lang = inferred.code || sanitizeFilename(inferred.label);
-  const filename = `${title}_${lang}.${ext}`;
-  chrome.runtime.sendMessage({
-    action: 'download',
+async function triggerDownloadSubtitle(subFile) {
+  const filename = `${getMediaFilenameBase()}.vtt`;
+  console.log('[Cinemana DL Extension] Downloading subtitle as:', filename, subFile.url);
+
+  sendDownloadMessage({
+    action: 'downloadSubtitle',
     url: normalizeDownloadUrl(subFile.url),
-    filename: filename
+    filename: filename,
+    pageTitle: document.title || '',
+    pageUrl: location.href
+  }, response => {
+    if (!response || !response.ok) {
+      alert((response && response.error) || getUiText('noSubtitle'));
+    }
   });
 }
 
