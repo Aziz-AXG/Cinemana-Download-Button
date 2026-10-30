@@ -395,15 +395,6 @@ function getCleanSubtitlePath(url) {
   }
 }
 
-function sanitizeFilename(str) {
-  return String(str || '')
-    .trim()
-    .replace(/['"]/g, '')
-    .replace(/[^a-z0-9\u0600-\u06FF_-]/gi, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '') || 'Cinemana_Video';
-}
-
 function normalizeDownloadUrl(url) {
   try {
     return new URL(String(url || '').replace(/&amp;/g, '&'), location.href).href;

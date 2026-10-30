@@ -1,4 +1,5 @@
 // Background script for Cinemana Download Button
+importScripts('filename.js');
 
 // Chrome ignores the `filename` option in chrome.downloads.download() when
 // the url is a data: URI, silently falling back to "download.<ext>". To
@@ -77,18 +78,10 @@ async function handleSubtitleDownload(message, sender) {
 }
 
 function sanitizeDownloadFilename(filename, fallbackBase = 'Cinemana_Subtitle') {
-  const safe = String(filename || '')
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
-    .replace(/\s+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
-
-  if (!safe || /^download(?:\.\w+)?$/i.test(safe)) {
-    const fallback = sanitizeFilenameBase(fallbackBase);
-    return `${fallback && !/^download$/i.test(fallback) ? fallback : 'Cinemana_Subtitle'}.vtt`;
-  }
-
-  return safe;
+  const fallback = sanitizeFilenameBase(fallbackBase);
+  const fallbackFilename = `${!/^download$/i.test(fallback) ? fallback : 'Cinemana_Subtitle'}.vtt`;
+  const safe = sanitizeFilename(filename, fallbackFilename);
+  return /^download(?:\.\w+)?$/i.test(safe) ? fallbackFilename : safe;
 }
 
 function ensureFileExtension(filename, ext) {
@@ -106,13 +99,9 @@ function getSubtitleFallbackBase(message, sender) {
 }
 
 function sanitizeFilenameBase(value) {
-  return String(value || '')
+  return sanitizeFilename(String(value || '')
     .replace(/\.[a-z0-9]+$/i, '')
-    .replace(/\s*[-|]\s*Cinemana.*$/i, '')
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
-    .replace(/\s+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
+    .replace(/\s*[-|]\s*Cinemana.*$/i, ''), 'Cinemana_Subtitle');
 }
 
 function normalizeSubtitleUrl(url) {
